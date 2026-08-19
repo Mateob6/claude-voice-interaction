@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# Raz — unified voice interface CLI for Claude Code
+# TTS (kokoro-mlx) + STT (mlx-whisper), one system
+
+RAZ_PORT="${RAZ_PORT:-8787}"
+RAZ_URL="http://127.0.0.1:${RAZ_PORT}"
+RAZ_DIR="$HOME/Desktop/Proyectos/raz"
+
+# --- helpers ---
+
+tts_running() {
+    curl -s --max-time 1 "$RAZ_URL/health" >/dev/null 2>&1
+}
+
+stt_running() {
+    [ -f /tmp/raz-daemon.pid ] && kill -0 "$(cat /tmp/raz-daemon.pid)" 2>/dev/null
+}
+
+start_tts() {
+    "$RAZ_DIR/scripts/start_server.sh"
+}
+
+stop_tts() {
+    "$RAZ_DIR/scripts/stop_server.sh"
+}
+
+start_stt() {
+    local LANG="${1:-es}"
+    if stt_running; then
+        echo "STT daemon already running (PID: $(cat /tmp/raz-daemon.pid))"
+        return 0
+    fi
+    echo "Starting STT daemon (lang=$LANG)..."
+    echo "Hotkey: Right Option (⌥) — hold to record, release to transcribe"
+    cd "$RAZ_DIR" && nohup uv run python -c "from raz.stt.daemon import run_daemon; run_daemon(lang='$LANG')" >> /tmp/raz-daemon.log 2>&1 &
+    DAEMON_PID=$!
+    echo "$DAEMON_PID" > /tmp/raz-daemon.pid
+    echo "PID: $DAEMON_PID"
+    echo "Log: /tmp/raz-daemon.log"
+    echo -n "Loading Whisper model"
+    for i in $(seq 1 30); do
+        if grep -q "Listening for hotkey" /tmp/raz-daemon.log 2>/dev/null; then
+            echo " ready!"
+            return 0
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo " (check log if not working)"
+}
+
+stop_stt() {
+    cd "$RAZ_DIR" && uv run python -c "from raz.stt.daemon import stop_daemon; stop_daemon()"
+}
+
+stt_status() {
+    cd "$RAZ_DIR" && uv run python -c "from raz.stt.daemon import daemon_status; daemon_status()" 2>/dev/null || echo "Not available."
+}
+
+# --- main dispatch ---
+
+case "${1:-status}" in
+
+    # === Unified lifecycle ===
+    start)
+        echo "=== Starting Raz ==="
+        start_tts
+        start_stt "${2:-es}"
+        ;;
+    stop)
+        echo "=== Stopping Raz ==="
+        stop_stt
+        stop_tts
+        ;;
+    on)
+        curl -s -X POST "$RAZ_URL/on" | python3 -m json.tool 2>/dev/null || echo "TTS not running. Use: raz start"
+        if ! stt_running; then
+            start_stt "${2:-es}"
+        fi
+        ;;
+    off)
+        curl -s -X POST "$RAZ_URL/off" | python3 -m json.tool 2>/dev/null || echo "TTS not running."
+        if stt_running; then
+            stop_stt
+        fi
+        ;;
+    toggle)
+        curl -s -X POST "$RAZ_URL/toggle" | python3 -m json.tool 2>/dev/null || echo "TTS not running. Use: raz start"
+        ;;
+    status)
+        # Unified status — Raz as one entity
+        TTS_JSON=$(curl -s --max-time 1 "$RAZ_URL/health" 2>/dev/null)
+        STT_JSON=$(cd "$RAZ_DIR" && uv run python -c "
+import json
+from raz.stt.daemon import daemon_status
+print(json.dumps(daemon_status(quiet=True)))
+" 2>/dev/null || echo '{"running": false}')
+
+        if [ -n "$TTS_JSON" ]; then
+            # Merge into unified view
+            python3 -c "
+import sys, json
+tts = json.loads(sys.argv[1])
+stt = json.loads(sys.argv[2])
+raz = {
+    'status': 'active' if tts.get('status') == 'ok' else 'inactive',
+    'voice': tts.get('voice', 'unknown'),
+    'mode': tts.get('mode', 'smart'),
+    'speed': tts.get('speed', 1.0),
+    'enabled': tts.get('enabled', False),
+    'mic': 'on' if stt.get('running') else 'off',
+}
+if stt.get('pid'):
+    raz['mic_pid'] = stt['pid']
+print(json.dumps(raz, indent=4))
+" "$TTS_JSON" "$STT_JSON"
+        else
+            python3 -c "
+import sys, json
+stt = json.loads(sys.argv[1])
+raz = {
+    'status': 'inactive',
+    'mic': 'on' if stt.get('running') else 'off',
+}
+if stt.get('pid'):
+    raz['mic_pid'] = stt['pid']
+print(json.dumps(raz, indent=4))
+" "$STT_JSON"
+        fi
+        ;;
+
+    # === TTS commands ===
+    say)
+        shift
+        TEXT="$*"
+        if [ -z "$TEXT" ]; then
+            echo "Usage: raz say \"text to speak\""
+            exit 1
+        fi
+        curl -s -X POST "$RAZ_URL/speak" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg text "$TEXT" '{"text": $text}')" \
+            | python3 -m json.tool 2>/dev/null || echo "Raz not running."
+        ;;
+    voice)
+        if [ -z "$2" ]; then
+            echo "Usage: raz voice <name>"
+            echo "Examples: em_alex, ef_dora, af_heart, am_adam"
+            exit 1
+        fi
+        curl -s -X POST "$RAZ_URL/voice" \
+            -H "Content-Type: application/json" \
+            -d "{\"voice\": \"$2\"}" \
+            | python3 -m json.tool 2>/dev/null || echo "Raz not running."
+        ;;
+    voices)
+        curl -s "$RAZ_URL/voices" | python3 -m json.tool 2>/dev/null || echo "Raz not running."
+        ;;
+    mode)
+        if [ -z "$2" ]; then
+            curl -s "$RAZ_URL/health" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Mode: {d[\"mode\"]}')" 2>/dev/null || echo "Raz not running."
+        else
+            curl -s -X POST "$RAZ_URL/mode" \
+                -H "Content-Type: application/json" \
+                -d "{\"mode\": \"$2\"}" \
+                | python3 -m json.tool 2>/dev/null || echo "Raz not running."
+        fi
+        ;;
+    speed)
+        if [ -z "$2" ]; then
+            curl -s "$RAZ_URL/health" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Speed: {d[\"speed\"]}')" 2>/dev/null || echo "Raz not running."
+        else
+            curl -s -X POST "$RAZ_URL/speed" \
+                -H "Content-Type: application/json" \
+                -d "{\"speed\": $2}" \
+                | python3 -m json.tool 2>/dev/null || echo "Raz not running."
+        fi
+        ;;
+
+    # === STT commands ===
+    listen)
+        LANG="${2:-es}"
+        echo "Recording... speak now (Ctrl+C to stop)"
+        cd "$RAZ_DIR" && uv run python -c "
+from raz.stt.engine import listen_and_transcribe
+import subprocess
+text = listen_and_transcribe(language='$LANG')
+if text:
+    subprocess.run(['pbcopy'], input=text.encode(), check=True)
+    print(f'Copied to clipboard: {text}')
+else:
+    print('No audio or empty transcription')
+"
+        ;;
+    stt)
+        case "${2:-status}" in
+            start)  start_stt "${3:-es}" ;;
+            stop)   stop_stt ;;
+            status) stt_status ;;
+            *)
+                echo "Usage: raz stt <start|stop|status> [language]"
+                ;;
+        esac
+        ;;
+
+    # === Fine-grained TTS control ===
+    tts)
+        case "${2:-}" in
+            start)  start_tts ;;
+            stop)   stop_tts ;;
+            on)     curl -s -X POST "$RAZ_URL/on" | python3 -m json.tool 2>/dev/null || echo "TTS not running." ;;
+            off)    curl -s -X POST "$RAZ_URL/off" | python3 -m json.tool 2>/dev/null || echo "TTS not running." ;;
+            *)
+                echo "Usage: raz tts <start|stop|on|off>"
+                ;;
+        esac
+        ;;
+
+    # === Keyboard shortcut ===
+    shortcut)
+        WORKFLOW_DIR="$HOME/Library/Services/Activar Raz.workflow"
+        case "${2:-}" in
+            install)
+                if [ -d "$WORKFLOW_DIR" ]; then
+                    echo "Shortcut already installed."
+                else
+                    mkdir -p "$WORKFLOW_DIR/Contents"
+                    cp "$RAZ_DIR/resources/workflow/Info.plist" "$WORKFLOW_DIR/Contents/"
+                    cp "$RAZ_DIR/resources/workflow/document.wflow" "$WORKFLOW_DIR/Contents/"
+                    echo "Shortcut installed: 'Activar Raz'"
+                fi
+                echo ""
+                echo "To assign ⌃⌥R:"
+                echo "  1. System Settings → Keyboard → Keyboard Shortcuts → Services → General"
+                echo "  2. Find 'Activar Raz', click 'Add Shortcut'"
+                echo "  3. Press Ctrl+Option+R"
+                ;;
+            remove)
+                if [ -d "$WORKFLOW_DIR" ]; then
+                    rm -rf "$WORKFLOW_DIR"
+                    echo "Shortcut removed."
+                else
+                    echo "Shortcut not installed."
+                fi
+                ;;
+            *)
+                if [ -d "$WORKFLOW_DIR" ]; then
+                    echo "Shortcut 'Activar Raz' is installed."
+                else
+                    echo "Shortcut not installed. Run: raz shortcut install"
+                fi
+                echo ""
+                echo "Assign ⌃⌥R in: System Settings → Keyboard → Keyboard Shortcuts → Services"
+                ;;
+        esac
+        ;;
+
+    # === Backward compat: raz daemon → raz stt ===
+    daemon)
+        echo "Note: 'raz daemon' is now 'raz stt'. Both work."
+        case "${2:-status}" in
+            start)  start_stt "${3:-es}" ;;
+            stop)   stop_stt ;;
+            status) stt_status ;;
+            *)
+                echo "Usage: raz stt <start|stop|status> [language]"
+                ;;
+        esac
+        ;;
+
+    # === Help ===
+    help|*)
+        echo "Raz — voice interface for Claude Code"
+        echo ""
+        echo "  start           Start Raz (voice + mic)"
+        echo "  stop            Stop Raz"
+        echo "  on / off        Enable/disable Raz"
+        echo "  status          Show Raz status"
+        echo ""
+        echo "  say \"text\"      Speak text"
+        echo "  listen [lang]   Record → transcribe → clipboard"
+        echo "  voice NAME      Change voice (e.g. af_heart, em_alex)"
+        echo "  voices          List all 54 voices"
+        echo "  mode MODE       smart (default), auto, off"
+        echo "  speed N         0.5-2.0 (default 1.0)"
+        echo ""
+        echo "  stt start|stop  Mic only"
+        echo "  tts start|stop  Voice only"
+        ;;
+esac
