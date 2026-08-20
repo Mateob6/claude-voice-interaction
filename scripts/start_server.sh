@@ -19,9 +19,6 @@ if [ "$1" = "--fg" ]; then
 else
     echo "Starting Raz TTS server (background) on port ${RAZ_PORT}..."
     nohup uv run python -m raz.tts_server > /tmp/raz-server.log 2>&1 &
-    SERVER_PID=$!
-    echo "PID: ${SERVER_PID}"
-    echo "${SERVER_PID}" > /tmp/raz-server.pid
 
     # Wait for server to be ready
     for i in $(seq 1 30); do

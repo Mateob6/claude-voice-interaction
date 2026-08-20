@@ -67,10 +67,15 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+					<string>export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 
-if curl -s --max-time 0.5 http://127.0.0.1:8787/health &gt;/dev/null 2&gt;&amp;1; then
-    "$HOME/.local/bin/raz" stop &gt;/dev/null 2&gt;&amp;1
+TTS_UP=false
+STT_UP=false
+curl -s --max-time 0.5 http://127.0.0.1:8787/health &gt;/dev/null 2&gt;&amp;1 &amp;&amp; TTS_UP=true
+[ -f /tmp/raz-daemon.pid ] &amp;&amp; kill -0 "$(cat /tmp/raz-daemon.pid)" 2&gt;/dev/null &amp;&amp; STT_UP=true
+
+if $TTS_UP || $STT_UP; then
+    nohup "$HOME/.local/bin/raz" stop &gt;/dev/null 2&gt;&amp;1 &amp;
     osascript -e 'display notification "Raz apagado" with title "Raz"'
 else
     nohup "$HOME/.local/bin/raz" start &gt;/dev/null 2&gt;&amp;1 &amp;

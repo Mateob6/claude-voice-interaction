@@ -6,7 +6,6 @@ Auto-unloads Whisper after 5 min idle to free ~4 GB of memory.
 import os
 import signal
 import subprocess
-import sys
 import time
 import threading
 
@@ -118,13 +117,10 @@ def run_daemon(lang: str = "es"):
         f.write(str(os.getpid()))
 
     _log(f"Raz STT daemon started (lang={language}, hotkey=Right Option, idle={IDLE_TIMEOUT}s)")
-
-    # Lazy loading — don't pre-load Whisper, wait for first keypress
     _log("Listening for hotkey (Whisper loads on first use)...")
     model_loaded = False
     last_activity = time.time()
 
-    # Start idle monitor thread
     monitor = threading.Thread(target=_idle_monitor, daemon=True)
     monitor.start()
 
@@ -134,7 +130,7 @@ def run_daemon(lang: str = "es"):
             unload()
         if os.path.exists(PID_FILE):
             os.remove(PID_FILE)
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -143,25 +139,47 @@ def run_daemon(lang: str = "es"):
         listener.join()
 
 
+def _kill_orphans(quiet: bool = False) -> dict:
+    """Fallback: kill daemon processes by name when PID file is missing."""
+    result = subprocess.run(["pkill", "-f", "run_daemon"], capture_output=True)
+    if result.returncode == 0:
+        if not quiet:
+            print("Raz daemon stopped (found via pkill).")
+        return {"stopped": True, "method": "pkill"}
+    return {"stopped": False, "reason": "not running"}
+
+
 def stop_daemon(quiet: bool = False) -> dict:
     if not os.path.exists(PID_FILE):
-        if not quiet:
-            print("Raz daemon not running.")
-        return {"stopped": False, "reason": "not running"}
+        return _kill_orphans(quiet)
     with open(PID_FILE) as f:
         pid = int(f.read().strip())
     try:
         os.kill(pid, signal.SIGTERM)
-        if not quiet:
-            print(f"Raz daemon stopped (PID: {pid})")
-        result = {"stopped": True, "pid": pid}
     except ProcessLookupError:
         if not quiet:
             print("Raz daemon not running (stale PID).")
-        result = {"stopped": False, "reason": "stale PID", "pid": pid}
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+        return {"stopped": False, "reason": "stale PID", "pid": pid}
+
+    for _ in range(30):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     if os.path.exists(PID_FILE):
         os.remove(PID_FILE)
-    return result
+    if not quiet:
+        print(f"Raz daemon stopped (PID: {pid})")
+    return {"stopped": True, "pid": pid}
 
 
 def daemon_status(quiet: bool = False) -> dict:

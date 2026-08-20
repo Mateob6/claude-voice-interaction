@@ -31,7 +31,7 @@ def unload():
 def transcribe(audio: np.ndarray, language: str = "es") -> str:
     fn = _ensure_loaded()
     result = fn(audio, path_or_hf_repo=MODEL, language=language,
-                beam_size=1, best_of=1, condition_on_previous_text=False)
+                temperature=0.0, condition_on_previous_text=False)
     return result.get("text", "").strip()
 
 

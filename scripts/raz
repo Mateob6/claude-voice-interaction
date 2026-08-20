@@ -4,7 +4,7 @@
 
 RAZ_PORT="${RAZ_PORT:-8787}"
 RAZ_URL="http://127.0.0.1:${RAZ_PORT}"
-RAZ_DIR="$HOME/Desktop/Proyectos/raz"
+RAZ_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && cd .. && pwd)"
 
 # --- helpers ---
 
@@ -33,14 +33,12 @@ start_stt() {
     echo "Starting STT daemon (lang=$LANG)..."
     echo "Hotkey: Right Option (⌥) — hold to record, release to transcribe"
     cd "$RAZ_DIR" && nohup uv run python -c "from raz.stt.daemon import run_daemon; run_daemon(lang='$LANG')" >> /tmp/raz-daemon.log 2>&1 &
-    DAEMON_PID=$!
-    echo "$DAEMON_PID" > /tmp/raz-daemon.pid
-    echo "PID: $DAEMON_PID"
     echo "Log: /tmp/raz-daemon.log"
     echo -n "Loading Whisper model"
     for i in $(seq 1 30); do
-        if grep -q "Listening for hotkey" /tmp/raz-daemon.log 2>/dev/null; then
+        if [ -f /tmp/raz-daemon.pid ] && grep -q "Listening for hotkey" /tmp/raz-daemon.log 2>/dev/null; then
             echo " ready!"
+            echo "PID: $(cat /tmp/raz-daemon.pid)"
             return 0
         fi
         echo -n "."
@@ -230,10 +228,10 @@ else:
                     echo "Shortcut installed: 'Activar Raz'"
                 fi
                 echo ""
-                echo "To assign ⌃⌥R:"
+                echo "To assign ⌃⌘R:"
                 echo "  1. System Settings → Keyboard → Keyboard Shortcuts → Services → General"
                 echo "  2. Find 'Activar Raz', click 'Add Shortcut'"
-                echo "  3. Press Ctrl+Option+R"
+                echo "  3. Press Ctrl+Cmd+R"
                 ;;
             remove)
                 if [ -d "$WORKFLOW_DIR" ]; then
@@ -250,7 +248,7 @@ else:
                     echo "Shortcut not installed. Run: raz shortcut install"
                 fi
                 echo ""
-                echo "Assign ⌃⌥R in: System Settings → Keyboard → Keyboard Shortcuts → Services"
+                echo "Assign ⌃⌘R in: System Settings → Keyboard → Keyboard Shortcuts → Services"
                 ;;
         esac
         ;;

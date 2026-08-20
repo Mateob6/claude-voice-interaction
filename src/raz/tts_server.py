@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 from contextlib import asynccontextmanager
 
@@ -65,9 +66,14 @@ def _resolve_voice(text: str, voice: str) -> tuple[str, str | None]:
     return voice, tts_lang
 
 
+PID_FILE = "/tmp/raz-server.pid"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tts_engine
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
     from kokoro_mlx import KokoroTTS
     print("Loading kokoro-mlx model...")
     tts_engine = KokoroTTS.from_pretrained()
@@ -75,6 +81,8 @@ async def lifespan(app: FastAPI):
     print(f"Raz ready. {len(voices)} voices, mode={current_mode}, voice={current_voice}")
     yield
     print("Raz shutting down.")
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
 
 
 app = FastAPI(title="Raz TTS Server", lifespan=lifespan)
